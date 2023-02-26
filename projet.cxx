@@ -16,6 +16,8 @@
 #include <queue>
 #include <chrono>
 #include <array>
+#include <memory>
+
 
 static inline double sqr(double x) { return x * x; }
 
@@ -237,7 +239,27 @@ public:
 
 class BoundingBox {
 public:
-	BoundingBox() {}
+	BoundingBox() {
+		double t_min = std::numeric_limits<double>::lowest();
+		double t_max = std::numeric_limits<double>::max();
+		point_max = Vector(t_min, t_min, t_min);
+		point_min = Vector(t_max, t_max, t_max);
+	}
+	BoundingBox(Vector p_min, Vector p_max) {
+		point_min = p_min;
+		point_max = p_max;
+		centroid = 0.5 * (p_min + p_max);
+		Vector extent = point_max - point_min;
+		area = 2 * (extent[1] * (extent[0] + extent[2]) + extent[2] * extent[0]);
+		if (extent[0] > extent[1]) {
+			if (extent[0] > extent[2]) where_max_extent = 0;
+			else where_max_extent = 2;
+		}
+		else {
+			if (extent[1] > extent[2]) where_max_extent = 1;
+			else where_max_extent = 2;
+		}
+	}
 
 	bool intersect_ray(const Ray& r) const {
 		double tx1 = (point_min[0] - r.origin[0]) / r.direction[0];
@@ -258,8 +280,91 @@ public:
 		return std::min(txMax, std::min(tyMax, tzMax)) > std::max(txMin, std::max(tyMin, tzMin));
 	}
 
-	Vector point_min, point_max;
+	void compute() {
+		Vector extent = point_max - point_min;
+		centroid = 0.5 * (point_min + point_max);
+		area = 2 * (extent[1] * (extent[0] + extent[2]) + extent[2] * extent[0]);
+		if (extent[0] > extent[1]) {
+			if (extent[0] > extent[2]) where_max_extent = 0;
+			else where_max_extent = 2;
+		}
+		else {
+			if (extent[1] > extent[2]) where_max_extent = 1;
+			else where_max_extent = 2;
+		}
+	}
 
+
+	void merge(const BoundingBox &a) {
+		Vector new_p_max, new_p_min;
+		new_p_max = Vector(std::max(a.point_max[0], point_max[0]),
+						   std::max(a.point_max[1], point_max[1]),
+						   std::max(a.point_max[2], point_max[2]));
+		new_p_min = Vector(std::min(a.point_min[0], point_min[0]),
+						   std::min(a.point_min[1], point_min[1]),
+						   std::min(a.point_min[2], point_min[2]));
+		point_max = new_p_max;
+		point_min = new_p_min;
+	}
+
+
+
+	Vector point_min, point_max, centroid;
+	double area;
+	int where_max_extent;
+};
+
+
+BoundingBox Union(const BoundingBox &a, const BoundingBox &b) {
+	BoundingBox new_bbox;
+	new_bbox.point_max = Vector(std::max(a.point_max[0], b.point_max[0]),
+								std::max(a.point_max[1], b.point_max[1]),
+								std::max(a.point_max[2], b.point_max[2]));
+	new_bbox.point_min = Vector(std::min(a.point_min[0], b.point_min[0]),
+								std::min(a.point_min[1], b.point_min[1]),
+								std::min(a.point_min[2], b.point_min[2]));
+	return new_bbox;
+}
+
+struct BboxTree {
+	BboxTree () {
+		children[0] = children[1] = nullptr;
+	}
+
+	void initLeaf(const BoundingBox& bbox, int fTO, int nT) {
+		etiquette.point_max[0] = 1;
+		etiquette.point_max = bbox.point_max;
+		etiquette.point_min = bbox.point_min;
+		splitAxis = -1;
+		firstTriangleOffset = fTO;
+		nTriangles = nT;
+		children[0] = children[1] = nullptr;
+	}
+
+	void initInteriorNode(int sA, BboxTree *child_left, BboxTree *child_right) {
+		splitAxis = sA;
+ 		firstTriangleOffset = -1;
+		nTriangles = -1;
+		etiquette = Union(child_left->etiquette, child_right->etiquette);
+		children[0] = child_left;
+		children[1] = child_right;
+	}
+
+	int splitAxis, firstTriangleOffset, nTriangles;
+	BoundingBox etiquette;
+	BboxTree *children[2];
+};
+
+struct PointerLessBboxTreeNode {
+	PointerLessBboxTreeNode(BoundingBox b) {
+		bbox = b;
+		children[0] = -1;
+		children[1] = -1;
+	}
+
+	BoundingBox bbox;
+	int firstTriangleOffset, nTriangles;
+	int children[2];
 };
 
 
@@ -443,44 +548,98 @@ public:
 	}
 
 	bool intersect(const Ray& ray, Vector& P, Vector& N, double& t) const {
+
 		bool found_any_intersection = false;
 
-		if (!bbox.intersect_ray(ray)) return false;
+		std::pair<bool, std::vector<std::pair<int, int>>> intersction = bvhRayIntersect(ray, 0);
 
-		for (int i = 0; i < indices.size(); i++) {
-			Vector A = vertices[indices[i].vtxi];
-			Vector B = vertices[indices[i].vtxj];
-			Vector C = vertices[indices[i].vtxk];
+		if (!intersction.first) return false;
 
-			Vector e1 = B - A;
-			Vector e2 = C - A;
-			Vector local_N = cross(e1, e2);
-			Vector OA = A - ray.origin;
-			Vector OAxU = cross(OA, ray.direction);
+		for (int i = 0; i < intersction.second.size(); i++) {
+			for (int j = 0; j < intersction.second[i].second; j++) {
+				int offset = intersction.second[i].first;
 
-			double denom = 1 / dot(ray.direction, local_N);
+				Vector A = vertices[orderedTriangles[offset + j]->vtxi];
+				Vector B = vertices[orderedTriangles[offset + j]->vtxj];
+				Vector C = vertices[orderedTriangles[offset + j]->vtxk];
 
-			double local_t = dot(OA, local_N) * denom;
-			if (local_t < 0 or local_t > t)  continue;
+				Vector e1 = B - A;
+				Vector e2 = C - A;
+				Vector local_N = cross(e1, e2);
+				Vector OA = A - ray.origin;
+				Vector OAxU = cross(OA, ray.direction);
 
-			double beta = dot(e2, OAxU) * denom;
-			if (beta < 0 or beta > 1) continue;
+				double denom = 1 / dot(ray.direction, local_N);
 
-			double gamma = - dot(e1, OAxU) * denom;
-			if (gamma < 0 or gamma > 1) continue;
+				double local_t = dot(OA, local_N) * denom;
+				if (local_t < 0 or local_t > t)  continue;
 
-			double alpha = 1 - beta - gamma;
-			if (alpha < 0) continue;
+				double beta = dot(e2, OAxU) * denom;
+				if (beta < 0 or beta > 1) continue;
 
-			t = local_t;
-			P = A + beta * e1 + gamma * e2;
-			N = local_N;
-			found_any_intersection = true;
+				double gamma = - dot(e1, OAxU) * denom;
+				if (gamma < 0 or gamma > 1) continue;
+
+				double alpha = 1 - beta - gamma;
+				if (alpha < 0) continue;
+
+				t = local_t;
+				P = A + beta * e1 + gamma * e2;
+				N = normals[orderedTriangles[offset + j]->ni] +
+					normals[orderedTriangles[offset + j]->nj] * beta +
+					normals[orderedTriangles[offset + j]->nk] * gamma;
+				found_any_intersection = true;
+			}
 
 		}
 		if (found_any_intersection) N.normalize();
 		return found_any_intersection;
 	}
+
+
+	// bool intersect(const Ray& ray, Vector& P, Vector& N, double& t) const {
+
+	// 	bool found_any_intersection = false;
+
+	// 	if (!bbox.intersect_ray(ray)) return false;
+
+	// 	for (int i = 0; i < indices.size(); i++) {
+
+	// 			Vector A = vertices[indices[i].vtxi];
+	// 			Vector B = vertices[indices[i].vtxj];
+	// 			Vector C = vertices[indices[i].vtxk];
+
+	// 			Vector e1 = B - A;
+	// 			Vector e2 = C - A;
+	// 			Vector local_N = cross(e1, e2);
+	// 			Vector OA = A - ray.origin;
+	// 			Vector OAxU = cross(OA, ray.direction);
+
+	// 			double denom = 1 / dot(ray.direction, local_N);
+
+	// 			double local_t = dot(OA, local_N) * denom;
+	// 			if (local_t < 0 or local_t > t)  continue;
+
+	// 			double beta = dot(e2, OAxU) * denom;
+	// 			if (beta < 0 or beta > 1) continue;
+
+	// 			double gamma = - dot(e1, OAxU) * denom;
+	// 			if (gamma < 0 or gamma > 1) continue;
+
+	// 			double alpha = 1 - beta - gamma;
+	// 			if (alpha < 0) continue;
+
+	// 			t = local_t;
+	// 			P = A + beta * e1 + gamma * e2;
+	// 			N = local_N;
+	// 			found_any_intersection = true;
+
+
+	// 	}
+	// 	if (found_any_intersection) N.normalize();
+	// 	return found_any_intersection;
+	// }
+
 
 	void transform(double scale_factor, Vector translation, Vector rotation = Vector()) {
 		for (int i = 0; i < vertices.size(); i++) {
@@ -489,7 +648,7 @@ public:
 	}
 
 	void compute_bbox() {
-		double min_d = std::numeric_limits<double>::min();
+		double min_d = std::numeric_limits<double>::lowest();
 		double max_d = std::numeric_limits<double>::max();
 		bbox.point_min = Vector(max_d, max_d, max_d);
 		bbox.point_max = Vector(min_d, min_d, min_d);
@@ -501,9 +660,265 @@ public:
 			}
 		}
 
-		std::cout << bbox.point_min << ' ' << bbox.point_max << std::endl;
 	}
 
+
+	void compute_BVH() {
+		std::vector<std::pair<int, BoundingBox>> triangleInfo(indices.size());
+
+		for (int i = 0; i < indices.size(); i ++) {
+			Vector A = vertices[indices[i].vtxi];
+			Vector B = vertices[indices[i].vtxj];
+			Vector C = vertices[indices[i].vtxk];
+
+			BoundingBox bboxI(
+				Vector(
+					std::min(A[0], std::min(B[0], C[0])),
+					std::min(A[1], std::min(B[1], C[1])),
+					std::min(A[2], std::min(B[2], C[2]))
+				),
+				Vector(
+					std::max(A[0], std::max(B[0], C[0])),
+					std::max(A[1], std::max(B[1], C[1])),
+					std::max(A[2], std::max(B[2], C[2]))
+				)
+			);
+			triangleInfo[i] = std::pair<int, const BoundingBox>(i, bboxI);
+		}
+
+		int treeSize = 0;
+		BboxTree *root;
+		root = recursiveBuildBVH(triangleInfo, 0, triangleInfo.size(), treeSize);
+		flattenBVHTree(root);
+	}
+
+	BboxTree* recursiveBuildBVH(std::vector<std::pair<int, BoundingBox>>& triangleInfo, int start, int end, int& treeSize) {
+		BboxTree *node = new BboxTree;
+		treeSize++;
+
+		int ntriangles = end - start;
+		if (ntriangles == 1) {
+			// Create leaf node
+			// std::cout << "Right before crash" << std::endl;
+			// std::cout << "Bounding box : " << triangleInfo[start].second.point_min << triangleInfo[start].second.point_max << std::endl;
+			node->initLeaf(triangleInfo[start].second, orderedTriangles.size(), ntriangles);
+
+			for (int i = start; i < end; i++) {
+				orderedTriangles.push_back(&indices[triangleInfo[i].first]);
+			}
+			return node;
+		}
+
+		BoundingBox global_bbox = triangleInfo[start].second;
+		for (int i = start + 1; i < end; i++) {
+			global_bbox.merge(triangleInfo[i].second);
+		}
+		global_bbox.compute();
+
+		int splitDim = global_bbox.where_max_extent;
+
+		int mid = (start + end) / 2;
+
+		// Check if somehow the biggest extent is 0 i.e. several triangles have the same centroid
+		if (global_bbox.point_max[splitDim] == global_bbox.point_min[splitDim]){
+			int firstTriangleOffset = orderedTriangles.size();
+			for (int i = start; i < end; i++) {
+				orderedTriangles.push_back(&indices[triangleInfo[i].first]);
+			}
+			node->initLeaf(global_bbox, firstTriangleOffset, ntriangles);
+			return node;
+		}
+
+		// Split according to approximate SAH
+		if (ntriangles < 4) {
+			// If less than 4 triangles simply use equally size subsets to split
+			std::nth_element(
+				&triangleInfo[start], &triangleInfo[mid], &triangleInfo[end - 1] + 1,
+				[splitDim](const std::pair<int, BoundingBox> &a, const std::pair<int, BoundingBox> &b) {
+					return (a.second.centroid[splitDim] < b.second.centroid[splitDim]);
+				}
+			);
+
+			node ->initInteriorNode(
+				splitDim,
+				recursiveBuildBVH(
+					triangleInfo,
+					start,
+					mid,
+					treeSize
+				),
+				recursiveBuildBVH(
+					triangleInfo,
+					mid,
+					end,
+					treeSize
+				)
+			);
+			return node;
+		}
+		int nbuckets = 12;
+		struct Bucket
+		{
+			int count = 0;
+			BoundingBox bbox;
+		};
+		Bucket buckets[nbuckets];
+
+		// Fill buckets
+		for (int i = start; i < end; i++) {
+			double offset = (triangleInfo[i].second.centroid[splitDim] - global_bbox.point_min[splitDim]) /
+							(global_bbox.point_max[splitDim] - global_bbox.point_min[splitDim]);
+
+			int b = nbuckets * offset;
+			if (b == nbuckets) b -= 1;
+			buckets[b].count ++;
+			buckets[b].bbox.merge(triangleInfo[i].second);
+		}
+		for (int n = 0; n < nbuckets; n++) {
+			if (buckets[n].count == 0) buckets[n].bbox.area = 0;
+			else buckets[n].bbox.compute();
+		}
+
+		// Compute approximate SAH cost for each split
+		// Travel forward  and backwards to compute the cost of the buckets and its predecessors
+		int cumulative_count_forward, cumulative_count_backward;
+		double cost_forward[nbuckets - 1], cost_backward[nbuckets - 1];
+
+		BoundingBox cumulative_bbox_forward = buckets[0].bbox, cumulative_bbox_backward = buckets[nbuckets - 1].bbox;
+
+		cumulative_count_forward = buckets[0].count;
+		cumulative_count_backward = buckets[nbuckets - 1].count;
+
+		cost_forward[0] = cumulative_count_forward * cumulative_bbox_forward.area;
+		cost_backward[nbuckets - 2] = cumulative_count_backward * cumulative_bbox_backward.area;
+
+		for (int n = 1; n < nbuckets - 1; n ++) {
+			// Update bounding boxes
+			cumulative_bbox_forward.merge(buckets[n].bbox);
+			cumulative_bbox_forward.compute();
+
+			cumulative_bbox_backward.merge(buckets[nbuckets - 1 - n].bbox);
+			cumulative_bbox_backward.compute();
+
+			cumulative_count_forward += buckets[n].count;
+			cumulative_count_backward += buckets[nbuckets - n - 1].count;
+
+			cost_forward[n] = cumulative_count_forward * cumulative_bbox_forward.area;
+			cost_backward[nbuckets - 1 - n - 1] = cumulative_count_backward * cumulative_bbox_backward.area;
+
+		}
+
+		if (start == 2058 and end== 2062) throw std::invalid_argument("Oui");
+		int where_min_cost = 0;
+		double cost = cost_forward[0] + cost_backward[0];
+		for (int n = 1; n < nbuckets - 1; n++) {
+			if (cost_forward[n] + cost_backward[n] < cost) {
+				cost = cost_forward[n] + cost_backward[n];
+				where_min_cost = n;
+			}
+		}
+
+		int ntriangles_before_split = 0;
+
+		for (int n = 0; n < where_min_cost + 1; n ++){
+			ntriangles_before_split += buckets[n].count;
+		}
+
+		double leafCost = ntriangles;
+		if ((cost / global_bbox.area) + 0.125 < leafCost) {
+			std::pair<int, BoundingBox> *pmid = std::partition(
+				&triangleInfo[start], &triangleInfo[end - 1] + 1,
+				[=] (const std::pair<int, BoundingBox> &pi) {
+					double offset = (pi.second.centroid[splitDim] - global_bbox.point_min[splitDim]) /
+									(global_bbox.point_max[splitDim] - global_bbox.point_min[splitDim]);
+
+					int b = nbuckets * offset;
+					if (b == nbuckets) b = nbuckets - 1;
+					return b <= where_min_cost;
+				}
+			);
+
+			mid = pmid - &triangleInfo[0];
+
+			node->initInteriorNode(
+				splitDim,
+				recursiveBuildBVH(
+					triangleInfo,
+					start,
+					mid,
+					treeSize
+				),
+				recursiveBuildBVH(
+					triangleInfo,
+					mid,
+					end,
+					treeSize
+				)
+			);
+		}
+		else {
+			node->initLeaf(
+				global_bbox,
+				orderedTriangles.size(),
+				ntriangles
+			);
+			for (int i = start; i < end; i++) {
+				orderedTriangles.push_back(&indices[triangleInfo[i].first]);
+			}
+		}
+
+		return node;
+	}
+
+
+	void flattenBVHTree(BboxTree *node) {
+		PointerLessBboxTreeNode new_node(
+			node->etiquette
+		);
+
+		boundingVolumeHierarchy.push_back(new_node);
+		int current_last = boundingVolumeHierarchy.size() - 1;
+		if (node->children[0] != nullptr) {
+			boundingVolumeHierarchy[current_last].children[0] = boundingVolumeHierarchy.size();
+			flattenBVHTree(node->children[0]);
+
+			boundingVolumeHierarchy[current_last].children[1] = boundingVolumeHierarchy.size();
+			flattenBVHTree(node->children[1]);
+		}
+		else {
+			boundingVolumeHierarchy[current_last].firstTriangleOffset = node->firstTriangleOffset;
+			boundingVolumeHierarchy[current_last].nTriangles = node->nTriangles;
+		}
+		delete node;
+	}
+
+	std::pair<bool, std::vector<std::pair<int, int>>> bvhRayIntersect(const Ray &r, const int current_node) const {
+		const PointerLessBboxTreeNode& node = boundingVolumeHierarchy[current_node];
+		if (node.children[0] == -1) {
+			std::vector<std::pair<int, int>> offsets_and_number_of_triangles;
+			offsets_and_number_of_triangles.push_back(std::pair<int, int>(node.firstTriangleOffset, node.nTriangles));
+			return std::pair<bool, std::vector<std::pair<int, int>>>(true, offsets_and_number_of_triangles);
+		}
+		bool found_intersect_below = false;
+		std::vector<std::pair<int, int>> result;
+		if (boundingVolumeHierarchy[node.children[0]].bbox.intersect_ray(r)) {
+			std::pair<bool, std::vector<std::pair<int, int>>> result_left = bvhRayIntersect(r, node.children[0]);
+			if (result_left.first) {
+				found_intersect_below = true;
+				result.reserve(result.size() + distance(result_left.second.begin(), result_left.second.end()));
+				result.insert(result.end(), result_left.second.begin(), result_left.second.end());
+			}
+		}
+		if (boundingVolumeHierarchy[node.children[1]].bbox.intersect_ray(r)) {
+			std::pair<bool, std::vector<std::pair<int, int>>> result_right = bvhRayIntersect(r, node.children[1]);
+			if (result_right.first) {
+				found_intersect_below = true;
+				result.reserve(result.size() + distance(result_right.second.begin(), result_right.second.end()));
+				result.insert(result.end(), result_right.second.begin(), result_right.second.end());
+			}
+		}
+		return std::pair<bool, std::vector<std::pair<int, int>>>(found_intersect_below, result);
+	}
 
 	std::vector<TriangleIndices> indices;
 	std::vector<Vector> vertices;
@@ -511,7 +926,11 @@ public:
 	std::vector<Vector> uvs;
 	std::vector<Vector> vertexcolors;
 
+	std::vector<PointerLessBboxTreeNode> boundingVolumeHierarchy;
+	std::vector<TriangleIndices *> orderedTriangles;
+
 	BoundingBox bbox;
+
 };
 
 // ====================================================================================================================
@@ -710,12 +1129,18 @@ int main() {
 	scene.add_object(S_murg);
 	scene.add_object(S_murd);
 	scene.add_object(S_fond);
-	scene.add_object(S_derriere);
+	// scene.add_object(S_derriere);
 
 	TriangleMesh mesh;
 	mesh.readOBJ("cat.obj");
 	mesh.transform(0.6, Vector(0, -10, 0));
-	mesh.compute_bbox();
+	// mesh.compute_bbox();
+	mesh.compute_BVH();
+	auto t2 = std::chrono::steady_clock::now();
+
+	auto duration_s_bvh = std::chrono::duration_cast<std::chrono::seconds>(t2 - t1).count();
+	std::cout << "BVH building took " << duration_s_bvh << " seconds" << std::endl;
+
 	scene.add_object(mesh);
 
 	Vector camera(0, 0, 55);
@@ -723,7 +1148,7 @@ int main() {
 
 	std::vector<unsigned char> image(W*H * 3, 0);
 
-	int maxRays = 4;
+	int maxRays = 64;
 
 #pragma omp parallel for schedule(dynamic, 1)
 	for (int i = 0; i < H; i++) {
@@ -761,15 +1186,14 @@ int main() {
 
 		}
 	}
-	auto t2 = std::chrono::steady_clock::now();
+	auto t3 = std::chrono::steady_clock::now();
 
-	auto duration_s = std::chrono::duration_cast<std::chrono::seconds>(t2 - t1).count();
-	std::cout << "Rendering took " << duration_s << " seconds" << std::endl;
-	std::string s = "Seance_25-02_" + std::to_string(W) + "_" + std::to_string(H) + "_" + std::to_string(maxRays) + ".png";
+	auto duration_s_render = std::chrono::duration_cast<std::chrono::seconds>(t3 - t2).count();
+	std::cout << "Rendering took " << duration_s_render << " seconds" << std::endl;
+	std::string s = "Test_bvh_" + std::to_string(W) + "_" + std::to_string(H) + "_" + std::to_string(maxRays) + ".png";
 	char const *pchar = s.c_str();
 
 	stbi_write_png(pchar, W, H, 3, &image[0], 0);
-
 
 	return 0;
 }
