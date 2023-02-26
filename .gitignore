@@ -4,3 +4,5 @@ cadnav.com_model/
 *.rar
 *.pdf
 *.obj
+
+.vscode/
