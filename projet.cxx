@@ -18,10 +18,9 @@
 #include <array>
 #include <memory>
 
-
 static inline double sqr(double x) { return x * x; }
 
-std::default_random_engine generator[64];
+std::default_random_engine generator[16];
 std::uniform_real_distribution<double> uniform(0.0,1.0);
 
 
@@ -149,14 +148,16 @@ public:
 // ====================================================================================================================
 class Geometry {
 public:
-	Geometry(Vector alb, bool mir, bool trans, bool refract) : albedo(alb), mirror(mir), transparency(trans), refraction_index(refract) {}
+	Geometry(Vector alb, bool mir, bool trans, double refract, bool inv_n) : albedo(alb), mirror(mir), transparency(trans), refraction_index(refract),
+	inverted_normals(inv_n) {}
 
-	virtual bool intersect(const Ray&, Vector&, Vector&, double&) const = 0;
+	virtual bool intersect(const Ray&, Vector&, Vector&, double&, Vector&) const = 0;
 
 	Vector albedo;
 	bool mirror;
 	bool transparency;
 	double refraction_index;
+	bool inverted_normals;
 };
 
 
@@ -173,13 +174,12 @@ public:
 		bool transparency=false,
 		double refraction=0.,
 		bool inverted_normal=false
-		) : Geometry:: Geometry(rho, mirror, transparency, refraction) {
+		) : Geometry:: Geometry(rho, mirror, transparency, refraction, inverted_normal) {
 			center = C;
 			radius = r;
-			inverted_normals = inverted_normal;
 		}
 
-	bool intersect(const Ray& ray, Vector& P, Vector& N, double& t) const {
+	bool intersect(const Ray& ray, Vector& P, Vector& N, double& t, Vector& alb) const {
 		double a = 1;
 		double b = dot(ray.direction, ray.origin - center);
 		double c = (ray.origin - center).norm2() - sqr(radius);
@@ -203,13 +203,14 @@ public:
 		if (inverted_normals) N = center - P;
 		else N = P - center;
 		N.normalize();
+		alb = this->albedo;
+
 
 		return true;
 	}
 
 	Vector center;
 	double radius;
-	bool inverted_normals;
 };
 
 
@@ -245,6 +246,7 @@ public:
 		point_max = Vector(t_min, t_min, t_min);
 		point_min = Vector(t_max, t_max, t_max);
 	}
+
 	BoundingBox(Vector p_min, Vector p_max) {
 		point_min = p_min;
 		point_max = p_max;
@@ -261,7 +263,7 @@ public:
 		}
 	}
 
-	bool intersect_ray(const Ray& r) const {
+	bool intersect_ray(const Ray& r, double &t_rencontre) const {
 		double tx1 = (point_min[0] - r.origin[0]) / r.direction[0];
 		double tx2 = (point_max[0] - r.origin[0]) / r.direction[0];
 		double txMin = std::min(tx1, tx2);
@@ -277,7 +279,9 @@ public:
 		double tzMin = std::min(tz1, tz2);
 		double tzMax = std::max(tz1, tz2);
 
-		return std::min(txMax, std::min(tyMax, tzMax)) > std::max(txMin, std::max(tyMin, tzMin));
+		t_rencontre = std::max(txMin, std::max(tyMin, tzMin));
+
+		return std::min(txMax, std::min(tyMax, tzMax)) > t_rencontre;
 	}
 
 	void compute() {
@@ -346,6 +350,7 @@ struct BboxTree {
  		firstTriangleOffset = -1;
 		nTriangles = -1;
 		etiquette = Union(child_left->etiquette, child_right->etiquette);
+		etiquette.compute();
 		children[0] = child_left;
 		children[1] = child_right;
 	}
@@ -355,8 +360,8 @@ struct BboxTree {
 	BboxTree *children[2];
 };
 
-struct PointerLessBboxTreeNode {
-	PointerLessBboxTreeNode(BoundingBox b) {
+struct PointerlessBboxTreeNode {
+	PointerlessBboxTreeNode(BoundingBox b) {
 		bbox = b;
 		children[0] = -1;
 		children[1] = -1;
@@ -371,7 +376,20 @@ struct PointerLessBboxTreeNode {
 class TriangleMesh : public Geometry {
 public:
 	~TriangleMesh() {}
-	TriangleMesh(Vector alb = Vector(1, 1, 1), bool mir = false, bool trans = false, bool refract = 1) : Geometry::Geometry(alb, mir, trans, refract) {}
+	TriangleMesh(Vector alb = Vector(1, 1, 1), bool mir = false, bool trans = false,
+				 double refract = 1, bool inverted_normals = false) : Geometry::Geometry(alb, mir, trans, refract, inverted_normals) {}
+
+	void loadTexture(const char * filename) {
+		int comp;
+		unsigned char * tex = stbi_load(filename, &texW, &texH, &comp, 3);
+		texture.resize(texW * texH);
+		for (int i = 0; i < texH * texW;  i++) {
+			texture[i] = Vector(std::pow(tex[i * 3] /255.0, 2.2),
+								std::pow(tex[i * 3 + 1] /255.0, 2.2),
+								std::pow(tex[i * 3 + 2] /255.0, 2.2)
+						);
+		}
+	}
 
 	void readOBJ(const char* obj) {
 
@@ -547,99 +565,6 @@ public:
 
 	}
 
-	bool intersect(const Ray& ray, Vector& P, Vector& N, double& t) const {
-
-		bool found_any_intersection = false;
-
-		std::pair<bool, std::vector<std::pair<int, int>>> intersction = bvhRayIntersect(ray, 0);
-
-		if (!intersction.first) return false;
-
-		for (int i = 0; i < intersction.second.size(); i++) {
-			for (int j = 0; j < intersction.second[i].second; j++) {
-				int offset = intersction.second[i].first;
-
-				Vector A = vertices[orderedTriangles[offset + j]->vtxi];
-				Vector B = vertices[orderedTriangles[offset + j]->vtxj];
-				Vector C = vertices[orderedTriangles[offset + j]->vtxk];
-
-				Vector e1 = B - A;
-				Vector e2 = C - A;
-				Vector local_N = cross(e1, e2);
-				Vector OA = A - ray.origin;
-				Vector OAxU = cross(OA, ray.direction);
-
-				double denom = 1 / dot(ray.direction, local_N);
-
-				double local_t = dot(OA, local_N) * denom;
-				if (local_t < 0 or local_t > t)  continue;
-
-				double beta = dot(e2, OAxU) * denom;
-				if (beta < 0 or beta > 1) continue;
-
-				double gamma = - dot(e1, OAxU) * denom;
-				if (gamma < 0 or gamma > 1) continue;
-
-				double alpha = 1 - beta - gamma;
-				if (alpha < 0) continue;
-
-				t = local_t;
-				P = A + beta * e1 + gamma * e2;
-				N = normals[orderedTriangles[offset + j]->ni] +
-					normals[orderedTriangles[offset + j]->nj] * beta +
-					normals[orderedTriangles[offset + j]->nk] * gamma;
-				found_any_intersection = true;
-			}
-
-		}
-		if (found_any_intersection) N.normalize();
-		return found_any_intersection;
-	}
-
-
-	// bool intersect(const Ray& ray, Vector& P, Vector& N, double& t) const {
-
-	// 	bool found_any_intersection = false;
-
-	// 	if (!bbox.intersect_ray(ray)) return false;
-
-	// 	for (int i = 0; i < indices.size(); i++) {
-
-	// 			Vector A = vertices[indices[i].vtxi];
-	// 			Vector B = vertices[indices[i].vtxj];
-	// 			Vector C = vertices[indices[i].vtxk];
-
-	// 			Vector e1 = B - A;
-	// 			Vector e2 = C - A;
-	// 			Vector local_N = cross(e1, e2);
-	// 			Vector OA = A - ray.origin;
-	// 			Vector OAxU = cross(OA, ray.direction);
-
-	// 			double denom = 1 / dot(ray.direction, local_N);
-
-	// 			double local_t = dot(OA, local_N) * denom;
-	// 			if (local_t < 0 or local_t > t)  continue;
-
-	// 			double beta = dot(e2, OAxU) * denom;
-	// 			if (beta < 0 or beta > 1) continue;
-
-	// 			double gamma = - dot(e1, OAxU) * denom;
-	// 			if (gamma < 0 or gamma > 1) continue;
-
-	// 			double alpha = 1 - beta - gamma;
-	// 			if (alpha < 0) continue;
-
-	// 			t = local_t;
-	// 			P = A + beta * e1 + gamma * e2;
-	// 			N = local_N;
-	// 			found_any_intersection = true;
-
-
-	// 	}
-	// 	if (found_any_intersection) N.normalize();
-	// 	return found_any_intersection;
-	// }
-
 
 	void transform(double scale_factor, Vector translation, Vector rotation = Vector()) {
 		for (int i = 0; i < vertices.size(); i++) {
@@ -659,9 +584,8 @@ public:
 				if (vertices[i][j] > bbox.point_max[j]) bbox.point_max[j] = vertices[i][j];
 			}
 		}
-
+		hasBoundingBox = true;
 	}
-
 
 	void compute_BVH() {
 		std::vector<std::pair<int, BoundingBox>> triangleInfo(indices.size());
@@ -689,6 +613,7 @@ public:
 		int treeSize = 0;
 		BboxTree *root;
 		root = recursiveBuildBVH(triangleInfo, 0, triangleInfo.size(), treeSize);
+		boundingVolumeHierarchy.reserve(treeSize);
 		flattenBVHTree(root);
 	}
 
@@ -696,12 +621,18 @@ public:
 		BboxTree *node = new BboxTree;
 		treeSize++;
 
+		BoundingBox global_bbox = triangleInfo[start].second;
+		for (int i = start + 1; i < end; i++) {
+			global_bbox.merge(triangleInfo[i].second);
+		}
+		global_bbox.compute();
+
 		int ntriangles = end - start;
-		if (ntriangles == 1) {
+		if (ntriangles < 5) {
 			// Create leaf node
 			// std::cout << "Right before crash" << std::endl;
 			// std::cout << "Bounding box : " << triangleInfo[start].second.point_min << triangleInfo[start].second.point_max << std::endl;
-			node->initLeaf(triangleInfo[start].second, orderedTriangles.size(), ntriangles);
+			node->initLeaf(global_bbox, orderedTriangles.size(), ntriangles);
 
 			for (int i = start; i < end; i++) {
 				orderedTriangles.push_back(&indices[triangleInfo[i].first]);
@@ -709,17 +640,13 @@ public:
 			return node;
 		}
 
-		BoundingBox global_bbox = triangleInfo[start].second;
-		for (int i = start + 1; i < end; i++) {
-			global_bbox.merge(triangleInfo[i].second);
-		}
-		global_bbox.compute();
+
 
 		int splitDim = global_bbox.where_max_extent;
 
 		int mid = (start + end) / 2;
 
-		// Check if somehow the biggest extent is 0 i.e. several triangles have the same centroid
+		// Check if somehow the biggest extent is 0 i.e. several triangles are "empty"
 		if (global_bbox.point_max[splitDim] == global_bbox.point_min[splitDim]){
 			int firstTriangleOffset = orderedTriangles.size();
 			for (int i = start; i < end; i++) {
@@ -730,7 +657,13 @@ public:
 		}
 
 		// Split according to approximate SAH
+
+		// Scene 5, 8 -> BVH avec seulement equal split
+		//if (true) {
+
+		// Autres scenes
 		if (ntriangles < 4) {
+
 			// If less than 4 triangles simply use equally size subsets to split
 			std::nth_element(
 				&triangleInfo[start], &triangleInfo[mid], &triangleInfo[end - 1] + 1,
@@ -808,7 +741,6 @@ public:
 
 		}
 
-		if (start == 2058 and end== 2062) throw std::invalid_argument("Oui");
 		int where_min_cost = 0;
 		double cost = cost_forward[0] + cost_backward[0];
 		for (int n = 1; n < nbuckets - 1; n++) {
@@ -816,12 +748,6 @@ public:
 				cost = cost_forward[n] + cost_backward[n];
 				where_min_cost = n;
 			}
-		}
-
-		int ntriangles_before_split = 0;
-
-		for (int n = 0; n < where_min_cost + 1; n ++){
-			ntriangles_before_split += buckets[n].count;
 		}
 
 		double leafCost = ntriangles;
@@ -870,9 +796,8 @@ public:
 		return node;
 	}
 
-
 	void flattenBVHTree(BboxTree *node) {
-		PointerLessBboxTreeNode new_node(
+		PointerlessBboxTreeNode new_node(
 			node->etiquette
 		);
 
@@ -892,33 +817,144 @@ public:
 		delete node;
 	}
 
-	std::pair<bool, std::vector<std::pair<int, int>>> bvhRayIntersect(const Ray &r, const int current_node) const {
-		const PointerLessBboxTreeNode& node = boundingVolumeHierarchy[current_node];
-		if (node.children[0] == -1) {
-			std::vector<std::pair<int, int>> offsets_and_number_of_triangles;
-			offsets_and_number_of_triangles.push_back(std::pair<int, int>(node.firstTriangleOffset, node.nTriangles));
-			return std::pair<bool, std::vector<std::pair<int, int>>>(true, offsets_and_number_of_triangles);
-		}
-		bool found_intersect_below = false;
-		std::vector<std::pair<int, int>> result;
-		if (boundingVolumeHierarchy[node.children[0]].bbox.intersect_ray(r)) {
-			std::pair<bool, std::vector<std::pair<int, int>>> result_left = bvhRayIntersect(r, node.children[0]);
-			if (result_left.first) {
-				found_intersect_below = true;
-				result.reserve(result.size() + distance(result_left.second.begin(), result_left.second.end()));
-				result.insert(result.end(), result_left.second.begin(), result_left.second.end());
+	bool intersect(const Ray &r, Vector &P, Vector &N, double &t, Vector& alb) const {
+
+		double t_inutile;
+		if(boundingVolumeHierarchy.size() == 0) {
+			bool found_intersection = false;
+			if (hasBoundingBox) if (!bbox.intersect_ray(r, t_inutile)) return false;
+
+			for (int i = 0; i < indices.size(); i++) {
+
+				Vector A = vertices[indices[i].vtxi];
+				Vector B = vertices[indices[i].vtxj];
+				Vector C = vertices[indices[i].vtxk];
+
+				Vector e1 = B - A;
+				Vector e2 = C - A;
+				Vector local_N = cross(e1, e2);
+				Vector OA = A - r.origin;
+				Vector OAxU = cross(OA, r.direction);
+
+				double denom = 1 / dot(r.direction, local_N);
+
+				double local_t = dot(OA, local_N) * denom;
+				if (local_t < 0 or local_t > t)  continue;
+
+				double beta = dot(e2, OAxU) * denom;
+				if (beta < 0 or beta > 1) continue;
+
+				double gamma = - dot(e1, OAxU) * denom;
+				if (gamma < 0 or gamma > 1) continue;
+
+				double alpha = 1 - beta - gamma;
+				if (alpha < 0) continue;
+
+				t = local_t;
+				P = A + beta * e1 + gamma * e2;
+				N = normals[indices[i].ni] * alpha +
+					normals[indices[i].nj] * beta +
+					normals[indices[i].nk] * gamma;
+
+				Vector uv = uvs[indices[i].uvi] * alpha +
+							uvs[indices[i].uvj] * beta +
+							uvs[indices[i].uvk] * gamma;
+
+				if (texture.size()  == 0) alb = albedo;
+				else {
+					uv  = Vector(std::abs(uv[0]), std::abs(uv[1]), 0);
+					uv  = Vector(uv[0] - (int)uv[0], uv[1] - (int)uv[1], 0);
+					uv  = uv * Vector(texW - 1, texH - 1, 1);
+					uv[1] = texH - 1 - uv[1];
+					uv  = Vector((int)uv[0], (int)uv[1], 0);
+					alb = texture[uv[1] * texW + uv[0]];
+				}
+				found_intersection = true;
 			}
+			return found_intersection;
 		}
-		if (boundingVolumeHierarchy[node.children[1]].bbox.intersect_ray(r)) {
-			std::pair<bool, std::vector<std::pair<int, int>>> result_right = bvhRayIntersect(r, node.children[1]);
-			if (result_right.first) {
-				found_intersect_below = true;
-				result.reserve(result.size() + distance(result_right.second.begin(), result_right.second.end()));
-				result.insert(result.end(), result_right.second.begin(), result_right.second.end());
-			}
-		}
-		return std::pair<bool, std::vector<std::pair<int, int>>>(found_intersect_below, result);
+
+
+		if (!boundingVolumeHierarchy[0].bbox.intersect_ray(r, t_inutile)) return false;
+
+		// std::queue<int> nodes_to_check;
+		// nodes_to_check.push(0);
+		bool found_intersection = intersect_recursive(r, P, N, t, alb, 0);
+		if (found_intersection) N.normalize();
+		if (inverted_normals) N = - N;
+		return found_intersection;
 	}
+
+	bool intersect_recursive(const Ray &r, Vector &P, Vector&N, double&t, Vector& alb, const int last_checked_node) const{
+		const PointerlessBboxTreeNode& node = boundingVolumeHierarchy[last_checked_node];
+
+		bool found_intersection = false;
+		if (node.children[0] == -1) { // Feuille
+			for (int i = node.firstTriangleOffset; i < node.firstTriangleOffset + node.nTriangles; i++) {
+
+				Vector A = vertices[orderedTriangles[i]->vtxi];
+				Vector B = vertices[orderedTriangles[i]->vtxj];
+				Vector C = vertices[orderedTriangles[i]->vtxk];
+
+				Vector e1 = B - A;
+				Vector e2 = C - A;
+				Vector local_N = cross(e1, e2);
+				Vector OA = A - r.origin;
+				Vector OAxU = cross(OA, r.direction);
+
+				double denom = 1 / dot(r.direction, local_N);
+
+				double local_t = dot(OA, local_N) * denom;
+				if (local_t < 0 or local_t > t)  continue;
+
+				double beta = dot(e2, OAxU) * denom;
+				if (beta < 0 or beta > 1) continue;
+
+				double gamma = - dot(e1, OAxU) * denom;
+				if (gamma < 0 or gamma > 1) continue;
+
+				double alpha = 1 - beta - gamma;
+				if (alpha < 0) continue;
+
+				t = local_t;
+				P = A + beta * e1 + gamma * e2;
+				N = normals[orderedTriangles[i]->ni] * alpha +
+					normals[orderedTriangles[i]->nj] * beta +
+					normals[orderedTriangles[i]->nk] * gamma;
+
+				Vector uv = uvs[orderedTriangles[i]->uvi] * alpha +
+							uvs[orderedTriangles[i]->uvj] * beta +
+							uvs[orderedTriangles[i]->uvk] * gamma;
+
+				if (texture.size()  == 0) alb = albedo;
+				else {
+					uv  = Vector(std::abs(uv[0]), std::abs(uv[1]), 0);
+					uv  = Vector(uv[0] - (int)uv[0], uv[1] - (int)uv[1], 0);
+					uv  = uv * Vector(texW - 1, texH - 1, 1);
+					uv[1] = texH - 1 - uv[1];
+					uv  = Vector((int)uv[0], (int)uv[1], 0);
+					alb = texture[uv[1] * texW + uv[0]];
+				}
+				found_intersection = true;
+			}
+			return found_intersection;
+		}
+
+		double t_rencontre_gauche, t_rencontre_droite;
+		bool intersect_gauche = boundingVolumeHierarchy[node.children[0]].bbox.intersect_ray(r, t_rencontre_gauche);
+		bool intersect_droite = boundingVolumeHierarchy[node.children[1]].bbox.intersect_ray(r, t_rencontre_droite);
+
+		// if (intersect_gauche and intersect_droite) {
+		// 	if (t_rencontre_gauche < t_rencontre_droite and t_rencontre_gauche < t) return intersect_recursive(r, P, N, t, node.children[0]);
+		// 	if (t_rencontre_droite < t) return intersect_recursive(r, P, N, t, node.children[1]);
+		// }
+		bool found_intersection_1 = false, found_intersection_2 = false;
+		if (intersect_gauche and t_rencontre_gauche < t) found_intersection_1 = intersect_recursive(r, P, N, t, alb, node.children[0]);
+		if (intersect_droite and t_rencontre_droite < t) found_intersection_2 = intersect_recursive(r, P, N, t, alb, node.children[1]);
+
+		return found_intersection_1 or found_intersection_2;
+	}
+
 
 	std::vector<TriangleIndices> indices;
 	std::vector<Vector> vertices;
@@ -926,10 +962,14 @@ public:
 	std::vector<Vector> uvs;
 	std::vector<Vector> vertexcolors;
 
-	std::vector<PointerLessBboxTreeNode> boundingVolumeHierarchy;
+	std::vector<PointerlessBboxTreeNode> boundingVolumeHierarchy;
 	std::vector<TriangleIndices *> orderedTriangles;
 
 	BoundingBox bbox;
+	bool hasBoundingBox;
+
+	int texH, texW;
+	std::vector<Vector> texture;
 
 };
 
@@ -942,21 +982,22 @@ public:
 
 	void add_object(const Geometry& G) {objects.push_back(&G);}
 
-	bool intersect_ray(const Ray& r, Vector& P, Vector& N, int& id, double& t) {
+	bool intersect_ray(const Ray& r, Vector& P, Vector& N, int& id, double& t, Vector& albedo) {
 
 		double local_t;
-		Vector local_P, local_N;
+		Vector local_P, local_N, local_albedo;
 
 		bool has_inter = false;
 
 		for (int i = 0; i < objects.size(); i++) {
-			if (objects[i]->intersect(r, local_P, local_N, local_t)) {
+			if (objects[i]->intersect(r, local_P, local_N, local_t, local_albedo)) {
 				has_inter = true;
 				if (local_t <= t) {
 					t = local_t;
 					P = local_P;
 					N = local_N;
 					id = i;
+					albedo = local_albedo;
 				}
 			}
 		}
@@ -968,11 +1009,11 @@ public:
 
 		if (rebond < 0) return Vector(0., 0., 0.); // Finish recursion when potentially overflowing
 
-		Vector P, N;
+		Vector P, N, current_albedo;
 		int id;
 		double t = std::numeric_limits<double>::max();
 
-		if (intersect_ray(ray, P, N, id, t)) {
+		if (intersect_ray(ray, P, N, id, t, current_albedo)) {
 
 			Vector colour;
 
@@ -1005,7 +1046,13 @@ public:
 				}
 				double cos_theta_i = dot(ray.direction, N_correct);
 
-				if (sqrt(1 - sqr(cos_theta_i)) < (n2_c/n1_c)){
+				double k = sqr((n1_c - n2_c) / (n1_c + n2_c));
+				double R = k + (1 - k) * std::pow(1 - std::abs(dot(N_correct, ray.direction)), 5);
+
+				int thread_id = omp_get_thread_num();
+				double u = uniform(generator[thread_id]);
+
+				if (u >= R and 1 - sqr(cos_theta_i) < sqr((n2_c/n1_c))){
 					// Seulement la refraction prise en compte
 					Vector omega_t_T = n1_c / n2_c * (ray.direction - cos_theta_i * N_correct);
 					Vector omega_t_N = - N_correct * sqrt(1 - sqr(n1_c / n2_c) * (1 - sqr(cos_theta_i)));
@@ -1024,20 +1071,6 @@ public:
 			}
 
 			else {
-				Vector albed = objects[id]->albedo;
-				// Hard direct lighting
-				// Vector NPrime, Pprime;
-				// int idprime;
-
-				// Ray Raylum(P + 10e-2 * N, vecLum);
-				// bool shadows_possible = intersect_ray(Raylum, Pprime, NPrime, idprime);
-
-				// bool shadows_exist = shadows_possible and (P - Pprime).norm2() <d2Lum;
-
-				// if (!shadows_exist) {
-				// 	colour = I * albed * std::max(dot(N, vecLum), 0.) / (4 * sqr(M_PI) * d2Lum);
-				// }
-
 				// Soft direct lighting
 				double lumRadius = dynamic_cast<const Sphere*>(this->objects[0])->radius;
 				Vector lumCenter = dynamic_cast<const Sphere*>(this->objects[0])->center;
@@ -1054,23 +1087,23 @@ public:
 
 				Ray Raylum(P + 1e-2 * N, x_xprime);
 
-				Vector NPrime, Pprime;
+				Vector NPrime, Pprime, albprime;
 				int idprime;
 				double tprime = 1e15;
 
-				bool shadows_possible = intersect_ray(Raylum, Pprime, NPrime, idprime, tprime);
+				bool shadows_possible = intersect_ray(Raylum, Pprime, NPrime, idprime, tprime, albprime);
 
 				bool shadows_exist = shadows_possible and sqr(tprime) < d2Lum * 0.95;
 
 				if (!shadows_exist) {
 					colour = I / (4 * sqr(M_PI) * sqr(lumRadius))
-					* albed / M_PI * std::max(dot(N, x_xprime), 0.) * std::max(dot(C_xprime, - x_xprime), 0.)
+					* current_albedo / M_PI * std::max(dot(N, x_xprime), 0.) * std::max(dot(C_xprime, - x_xprime), 0.)
 					/ (d2Lum * p_xprime);
 				}
 
 				// Compute indirect lighting component
 				Vector omegaI = random_cos(N);
-				Vector indirectColour = albed * getColour(Ray(P + 1e-3 * N, omegaI), rebond - 1, true);
+				Vector indirectColour = current_albedo * getColour(Ray(P + 1e-3 * N, omegaI), rebond - 1, true);
 
 				colour += indirectColour;
 
@@ -1098,11 +1131,12 @@ int main() {
     int W = 512;
     int H = 512;
 
+	Sphere S_diffuse(Vector(0, 25, 0), 10, Vector(0.7, 0.5, 0.3));
 	Sphere S_mirror(Vector(-20, 0, 0), 10, Vector(0.7, 0.5, 0.3), true);
 	Sphere S_full_transparent(Vector(0, 0, 0), 10, Vector(0.7, 0.5, 0.3), false, true, 1.4);
 
-	Sphere S_hollow_out(Vector(20, 0, 0.), 10, Vector(0.7, 0.5, 0.3), false, true, 1.25);
-	Sphere S_hollow_in(Vector(20, 0, 0.), 9.6, Vector(0.7, 0.5, 0.3), false, true, 1.25, true);
+	Sphere S_hollow_out(Vector(20, 0, 0.), 10, Vector(0.7, 0.5, 0.3), false, true, 1.4);
+	Sphere S_hollow_in(Vector(20, 0, 0.), 9.6, Vector(0.7, 0.5, 0.3), false, true, 1.4, true);
 
 	Sphere S_sol(Vector(0, -1000, 0), 1000 - 10, Vector(0, 0, 1));
 	Sphere S_plafond(Vector(0, 1000, 0), 1000 - 60, Vector(1, 0, 0));
@@ -1111,44 +1145,82 @@ int main() {
 	Sphere S_fond(Vector(0, 0, -1000), 1000 - 60, Vector(0, 1, 0));
 	Sphere S_derriere(Vector(0, 0, 1000), 1000 - 60, Vector(1, 0, 1));
 
-	Vector L(-10, 20, 40);
+	Vector L(0, 35, 40);
 	double I = 1e10;
 
-	Sphere lumiere(L, 10);
+	Sphere lumiere(L, 5);
 
 	Scene scene(I);
 
 	scene.add_object(lumiere);
 
-	// scene.add_sphere(S_mirror);
-	// scene.add_sphere(S_full_transparent);
-	// scene.add_sphere(S_hollow_out);
-	// scene.add_sphere(S_hollow_in);
+
+	// Scène 1 et 2
+	// scene.add_object(S_diffuse);
+	// scene.add_object(S_mirror);
+	// scene.add_object(S_full_transparent);
+	// scene.add_object(S_hollow_out);
+	// scene.add_object(S_hollow_in);
+
+
+	// Fond commun à toutes les scènes
 	scene.add_object(S_sol);
 	scene.add_object(S_plafond);
 	scene.add_object(S_murg);
 	scene.add_object(S_murd);
 	scene.add_object(S_fond);
-	// scene.add_object(S_derriere);
+	scene.add_object(S_derriere);
 
 	TriangleMesh mesh;
 	mesh.readOBJ("cat.obj");
-	mesh.transform(0.6, Vector(0, -10, 0));
-	// mesh.compute_bbox();
-	mesh.compute_BVH();
-	auto t2 = std::chrono::steady_clock::now();
 
-	auto duration_s_bvh = std::chrono::duration_cast<std::chrono::seconds>(t2 - t1).count();
-	std::cout << "BVH building took " << duration_s_bvh << " seconds" << std::endl;
+	// Scene 9
+	// mesh.loadTexture("cat_diff.png");
 
+	// Scene 10
+	mesh.transparency = true;
+	mesh.refraction_index = 1.4;
+
+	// Scene 3, 4, 5, 6, 7, 8, 9, 10
 	scene.add_object(mesh);
+	mesh.transform(0.6, Vector(0, -10, 0));
+
+	auto t2 = std::chrono::steady_clock::now();
+	auto duration_s_scene = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
+	std::cout << "Mesh loading and scene build took " << duration_s_scene << " microseconds" << std::endl;
+
+
+	// // Scene 4
+	// mesh.compute_bbox();
+
+	// Scene 5, 6, 7, 8, 9
+	mesh.compute_BVH();
+
+	auto t3 = std::chrono::steady_clock::now();
+	auto duration_bvh = std::chrono::duration_cast<std::chrono::microseconds>(t3 - t2).count();
+	std::cout << "BVH building took " << duration_bvh << " microseconds" << std::endl;
+
 
 	Vector camera(0, 0, 55);
+	double theta_dir = 0;
+	Vector cameraUp(0, cos(theta_dir), sin(theta_dir));
+	Vector cameraDir(0, sin(theta_dir), -cos(theta_dir));
+	Vector cameraRight = cross(cameraDir, cameraDir);
+	cameraRight.normalize();
+
 	double fov = 60 * M_PI / 180;
 
 	std::vector<unsigned char> image(W*H * 3, 0);
+	std::vector<double> image_double(W*H * 3, 0);
 
-	int maxRays = 64;
+	// //Scene 1, 7, 8, 9, 10
+	int maxRays = 200;
+
+	// // Scene 2
+	// int maxRays = 2000;
+
+	// Scene 3, 4, 5, 6
+	// int maxRays = 4;
 
 #pragma omp parallel for schedule(dynamic, 1)
 	for (int i = 0; i < H; i++) {
@@ -1170,28 +1242,40 @@ int main() {
                 double gaussY = rLog * sin(2 * M_PI * r2) * sigma;
 
                 // Compute the ray that passes through the pixel
-                Vector u(j - (double)W * 0.5 + gaussX, -i + (double)H * 0.5 + gaussY, -W / (2*tan(fov/2)));
+                Vector u = (j - (double)W * 0.5 + gaussX) * cameraRight +
+						   (-i + (double)H * 0.5 + gaussY) * cameraUp +
+						   (W / (2*tan(fov/2))) * cameraDir;
                 u.normalize();
                 Ray r(camera, u);
 
-                colour += scene.getColour(r, 20);
+                colour += scene.getColour(r, 15);
 
 			}
 			colour = (colour * 1/maxRays);
 
 			// Gamma correction
-			image[(i*W + j) * 3 + 0] = std::min(pow(colour[0], 0.45), 255.);   // RED
-			image[(i*W + j) * 3 + 1] = std::min(pow(colour[1], 0.45), 255.);  // GREEN
-			image[(i*W + j) * 3 + 2] = std::min(pow(colour[2], 0.45), 255.);  // BLUE
+			image_double[(i*W + j) * 3 + 0] = std::min(pow(colour[0], 0.45), 255.);   // RED
+			image_double[(i*W + j) * 3 + 1] = std::min(pow(colour[1], 0.45), 255.);  // GREEN
+			image_double[(i*W + j) * 3 + 2] = std::min(pow(colour[2], 0.45), 255.);  // BLUE
 
 		}
 	}
-	auto t3 = std::chrono::steady_clock::now();
+	const auto t4 = std::chrono::steady_clock::now();
+	const auto diff = t4 - t2;
+	const auto duration_min_render = std::chrono::duration_cast<std::chrono::minutes>(diff);
+	const auto duration_s_render = std::chrono::duration_cast<std::chrono::seconds>(diff - duration_min_render);
+	const auto duration_ms_render = std::chrono::duration_cast<std::chrono::milliseconds>(diff - duration_min_render - duration_s_render);
 
-	auto duration_s_render = std::chrono::duration_cast<std::chrono::seconds>(t3 - t2).count();
-	std::cout << "Rendering took " << duration_s_render << " seconds" << std::endl;
-	std::string s = "Test_bvh_" + std::to_string(W) + "_" + std::to_string(H) + "_" + std::to_string(maxRays) + ".png";
+	std::cout << "Rendering took " << duration_min_render.count() << " minutes, " << duration_s_render.count();
+	std::cout << " seconds and " << duration_ms_render.count() << " milliseconds" << std::endl;
+
+
+	for (int i = 0; i < W * H * 3; i++) image[i] = image_double[i];
+
+	std::string s = "Scene10_" + std::to_string(W) + "_" + std::to_string(H) + "_" + std::to_string(maxRays) + ".png";
 	char const *pchar = s.c_str();
+
+	std::cout << "Wrote result in " << pchar << std::endl;
 
 	stbi_write_png(pchar, W, H, 3, &image[0], 0);
 
