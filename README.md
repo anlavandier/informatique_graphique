@@ -117,3 +117,19 @@ Scène 10 :
 - Temps de rendu : 1 minutes et 20 secondes
 
 ![scene 10](Scene10_512_512_200.png)
+
+**Note : Les 10 scènes précedentes ont la gauche et la droite inversée à cause d'une erreur dans le définition des directions**
+
+### Autre scènes
+
+Une scène avec de la transparence sans réfléction de Fresnel mais avec 1024 * 1024 pixels et 5000 rayons par pixels
+
+![5000rays](image_soft_shadows_5000.png)
+
+Une scène similaire à la scène 9 mais à avec un angle de vue de caméra différent.
+
+![angle_de_vue](test_angle_chat_1024_1024_20.png)
+
+Une scène sans l'interpolation des normales
+
+![sans_interpolation](no_inter_2048_2048_64.png)
