@@ -2,7 +2,7 @@
 
 ## Rendu Antoine Lavandier
 
-**Tous les executables utilisés pour créer les scènes sont dans le dossier [binaries](binaries). Ils ont été compilé sous Ubuntu 20.04 avec les options `-O3` et `-fopenmp`. De plus toutes les rendus sont fait avec 15 rebonds au maximum"**
+**Tous les executables utilisés pour créer les scènes sont dans le dossier [binaries](binaries). Ils ont été compilé sous Ubuntu 20.04 avec les options `-O3` et `-fopenmp`. De plus toutes les rendus sont fait avec 15 rebonds au maximum**
 
 ### Scènes simples avec des sphères
 
