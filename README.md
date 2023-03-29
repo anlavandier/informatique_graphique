@@ -133,3 +133,8 @@ Une scène similaire à la scène 9 mais à avec un angle de vue de caméra diff
 Une scène sans l'interpolation des normales
 
 ![sans_interpolation](no_inter_2048_2048_64.png)
+
+
+## Crédits
+
+Le code de mon BVH est très largément inspiré et adapté du code trouvé sur cette page web [https://www.pbr-book.org/3ed-2018/Primitives_and_Intersection_Acceleration/Bounding_Volume_Hierarchies](https://www.pbr-book.org/3ed-2018/Primitives_and_Intersection_Acceleration/Bounding_Volume_Hierarchies) qui est la seule source que j'ai trouvée qui donnait une définition claire de la SAH. Une amélioration notable par rapport au code disponible sur cette page et le fait que l'évaluation des cou^ts des différents buckets est linéaire dans mon code alors qu'elle est quadratique dans le leur.
